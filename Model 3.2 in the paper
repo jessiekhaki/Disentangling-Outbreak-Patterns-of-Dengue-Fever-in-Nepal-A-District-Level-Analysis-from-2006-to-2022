@@ -1,0 +1,249 @@
+##CODE FOR THE FIRST SPECIFICATION OF THE OUTBREAK INTENSITY FUNCTION (MODEL IN EQUATION 3.2)
+
+#======================================================================================================
+rm(list=ls())
+
+data.mod2 <- readRDS("data.mod3.RDS")
+
+data.mod2$distr <- data.mod2$district
+
+library(cubature)
+library(dplyr)
+library(Rfast) #for Lgamma fun. works better then lgamma for large values
+
+#-------------------------------------------------------------------------------
+
+str(data.mod2)
+
+# District names and total number
+distr_names <- unique(sort(data.mod2$district))
+n_distr <- length(distr_names)
+
+# Matrix of covariates
+D <- model.matrix(~ ppt.max, data = data.mod2)
+
+# Indices to subset for each district
+ind_distr <- sapply(1:n_distr, function(i) which(data.mod2$distr==distr_names[i]))
+
+llik_distr <- function(par, data_distr, D_distr, year_comb, d = 1) {
+  
+  # Extract beta
+  beta <- par[1:p]
+  
+  #Extract the overdispersion parameter
+  alpha <- exp(par[p+1]) #so that it always returns +ve parameters
+  
+  # Extract the thetas
+  theta_1 <- par[p+2]
+  theta_2 <- par[p+3]
+  theta_3 <- par[p+4]
+  
+  # Extract the omegas
+  omega_1 <- exp(par[p+5])
+  omega_2 <- exp(par[p+6])
+  omega_3 <- exp(par[p+7])
+  
+  # Extract the mus
+  mu_1 <- year_comb[1]
+  mu_2 <- year_comb[2]
+  mu_3 <- year_comb[3]
+  
+  #gammas
+  gamma_1 <- exp(theta_1)
+  gamma_2 <- exp(theta_2)
+  gamma_3 <- exp(theta_3)
+  
+  # Calculate lambda (i.e. incidence)
+  lambda_district <- exp(log(data_distr$pop) + D_distr%*%beta )+
+    gamma_1 * exp(-0.5 * ((data_distr$year - mu_1) / omega_1)^2) + 
+    
+    gamma_2 * exp(-0.5 * ((data_distr$year - mu_2) / omega_2)^2) + 
+    
+    gamma_3 * exp(-0.5 * ((data_distr$year - mu_3) / omega_3)^2)   
+  
+  
+  # Combining all the likelihoods
+  # out <- sum(dpois(data_distr$cases, lambda = lambda_district, log = TRUE))
+  out <- sum(data_distr$cases * log(alpha) +
+               data_distr$cases* log(lambda_district) -
+               (data_distr$cases + 1 / alpha) * log(1 + alpha * lambda_district) +
+               Lgamma(data_distr$cases + 1 / alpha) -
+               Lgamma(data_distr$cases + 1) -
+               Lgamma(1/alpha) ) 
+  return(out)
+  
+}
+
+# Number of covariates
+p <- ncol(D)
+
+estim_distr <- list()
+
+year_comb_grid <- as.matrix(expand.grid(2006:2022, 2006:2022, 2006:2022))
+year_comb_grid <- year_comb_grid[year_comb_grid[,1] < year_comb_grid[,2] &
+                                   year_comb_grid[,1] < year_comb_grid[,3] &
+                                   year_comb_grid[,2] < year_comb_grid[,3],]
+n_year_comb <- nrow(year_comb_grid)
+
+# d is the "power" used to define the shape of the peak of the outbreak
+d_value <- 2
+
+
+plot_interpolation <- function(which_distr, d, district_name = district_name) {
+  
+  # Subset data for district
+  data_distr <- data.mod2[ind_distr[,which_distr],]
+  D_distr <- model.matrix(~1+ppt.max, data.mod2[ind_distr[,which_distr],])
+  
+  # Extract and alpha beta
+  beta <- estim_distr[[which_distr]]$beta
+  alpha <- estim_distr[[which_distr]]$alpha
+  
+  # Extract the thetas
+  theta_1 <- estim_distr[[which_distr]]$theta[1]
+  theta_2 <- estim_distr[[which_distr]]$theta[2]
+  theta_3 <- estim_distr[[which_distr]]$theta[3]
+  
+  # Extract the omegas
+  omega_1 <- estim_distr[[which_distr]]$omega[1]
+  omega_2 <- estim_distr[[which_distr]]$omega[2]
+  omega_3 <- estim_distr[[which_distr]]$omega[3]
+  
+  # Extract the mus
+  mu_1 <- estim_distr[[which_distr]]$mu[1]
+  mu_2 <- estim_distr[[which_distr]]$mu[2]
+  mu_3 <- estim_distr[[which_distr]]$mu[3]
+  
+  #gammas
+  gamma_1 <- exp(theta_1)
+  gamma_2 <- exp(theta_2)
+  gamma_3 <- exp(theta_3)
+  
+  # Calculate lambda (i.e. incidence)
+  lambda_district <- exp(log(data_distr$pop) + D_distr%*%beta) +
+    gamma_1 * exp(-0.5 * ((data_distr$year - mu_1) / omega_1)^d_value) + 
+    
+    gamma_2 * exp(-0.5 * ((data_distr$year - mu_2) / omega_2)^d_value) + 
+    
+    gamma_3 * exp(-0.5 * ((data_distr$year - mu_3) / omega_3)^d_value)  
+  
+  plot(data_distr$year, data_distr$cases,type="b", 
+       ylim = c(0, max(lambda_district, data_distr$cases)),
+       main = paste0("District"," ", i,":", " ", district_name),
+       xlab = "Year", ylab = "Number of cases" ) #pred cases
+  
+  points(data_distr$year, lambda_district, col = "red", pch = 20) #add obs cases
+  
+  # Combine legends and place it on the top left
+  legend("topleft", legend = c( "Observed", "Predicted"), col = c("black", "red"), 
+         lty = c(2, 0),  pch = c(1, 20), title = "", pt.cex=1.5)
+  
+}
+
+#formula for calculating predicted count
+pred.count <- function(which_distr, d, district_name = district_name) {
+  
+  # Subset data for district
+  data_distr <- data.mod2[ind_distr[,which_distr],]
+  D_distr <- model.matrix(~1+ppt.max, data.mod2[ind_distr[,which_distr],])
+  
+  # Extract and alpha beta
+  beta <- estim_distr[[which_distr]]$beta
+  alpha <- estim_distr[[which_distr]]$alpha
+  
+  # Extract the thetas
+  theta_1 <- estim_distr[[which_distr]]$theta[1]
+  theta_2 <- estim_distr[[which_distr]]$theta[2]
+  theta_3 <- estim_distr[[which_distr]]$theta[3]
+  
+  # Extract the omegas
+  omega_1 <- estim_distr[[which_distr]]$omega[1]
+  omega_2 <- estim_distr[[which_distr]]$omega[2]
+  omega_3 <- estim_distr[[which_distr]]$omega[3]
+  
+  # Extract the mus
+  mu_1 <- estim_distr[[which_distr]]$mu[1]
+  mu_2 <- estim_distr[[which_distr]]$mu[2]
+  mu_3 <- estim_distr[[which_distr]]$mu[3]
+  
+  #gammas
+  gamma_1 <- exp(theta_1)
+  gamma_2 <- exp(theta_2)
+  gamma_3 <- exp(theta_3)
+  
+  # Calculate lambda (i.e. incidence)
+  lambda_district <- exp(log(data_distr$pop) + D_distr%*%beta) +
+    gamma_1 * exp(-0.5 * ((data_distr$year - mu_1) / omega_1)^d_value) + 
+    
+    gamma_2 * exp(-0.5 * ((data_distr$year - mu_2) / omega_2)^d_value) + 
+    
+    gamma_3 * exp(-0.5 * ((data_distr$year - mu_3) / omega_3)^d_value)  
+  
+  return(lambda_district)
+  
+}
+
+#================================================================================
+#=----------------------------------------------------------------------
+plot_inter_list <- list()
+estim_count <- list()
+nb_prev_pred_list <- list()
+
+par(mfrow=c(3,3))
+
+par(mfrow=c(2,1))
+for(i in 1:n_distr) {
+  
+  # Subset data for district
+  data_distr <- data.mod2[ind_distr[,i],]
+  D_distr <- model.matrix(~1+ppt.max, data.mod2[ind_distr[,i],])
+  
+  beta_start <- rep(0, p)
+  alpha_start <- 0.5 #should, obviously, not be zero because of 1/alpha
+  theta_start <- rep(0,3)
+  log_omega_start <- rep(0,3)
+  par_start <- c(beta_start, alpha_start, theta_start, log_omega_start)
+  
+  estim_j <- list()
+  log_lik_j <- rep(NA, n_year_comb)
+  for(j in 1:n_year_comb) {
+    estim_j[[j]] <-
+      nlminb(par_start, function(x) -llik_distr(x, data_distr = data_distr,
+                                                D_distr = D_distr,
+                                                year_comb = year_comb_grid[j,],
+                                                d = d_value))
+    log_lik_j[j] <- -estim_j[[j]]$objective
+  }
+  
+  ind_opt <- which.max(log_lik_j)
+  estim_opt <- estim_j[[ind_opt]]
+  
+  estim_distr[[i]] <- list()
+  estim_distr[[i]]$beta <- estim_opt$par[1:p]
+  estim_distr[[i]]$alpha <- exp(estim_opt$par[p+1])
+  estim_distr[[i]]$theta <- estim_opt$par[(p+2):(p+4)]
+  estim_distr[[i]]$omega <- exp(estim_opt$par[(p+5):(p+7)])
+  estim_distr[[i]]$mu <- as.numeric(year_comb_grid[ind_opt,])
+  
+  estim_distr[[i]]$objective <- estim_opt$objective #for LRT
+
+  estim_count[[i]] <- pred.count(i, d = d_value, district_name = district_name_f)
+  
+  #get district_name
+  district_name_f <- distr_names[i]
+  
+  #also save the plot_interpolation for future use :)
+  plot_inter_list[[i]] <- plot_interpolation(i, d = d_value, district_name = district_name_f)
+  
+  #plot_interpolation(i, d = d_value, district_name = district_name_f)
+  
+  
+  cat(i, ": estimation completed \r")
+}
+
+
+estim_distr_nb <- estim_distr
+
+#save objects
+save(estim_distr, file="estim_distr_m12.RData")
+save(estim_count, file="estim_count_m12.RData")
